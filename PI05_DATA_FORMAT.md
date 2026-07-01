@@ -190,6 +190,32 @@ LeRobotDataset.create(repo_id, fps, features, root=None, robot_type=None,
 
 ---
 
+## 2.5 Reference embodiment data layouts (what "pi format" actually is)
+
+pi0.5's base model is trained on a **large multi-embodiment mix** (paper §IV: state = joint
+angles + gripper + torso lift + base velocity; action dim 18–19; *"predict target joint and
+end-effector poses"*). The three **fine-tunable openpi configs** below are what people mean by
+"the pi reference format" — plus our own Franka layout for contrast.
+
+| Dataset (openpi config) | Robot | Cameras (→ model slots) | `state` | `action` | Space / rotation | abs/delta | fps |
+|---|---|---|---|---|---|---|---|
+| **LIBERO** (`pi05_libero`) | Panda 1-arm | `image`,`wrist_image` 256² → `base_0_rgb`,`left_wrist_0_rgb` | **8**: EE pos(3)+**axis-angle**(3)+gripper qpos(2) | **7**: ΔEE pos(3)+Δ**axis-angle**(3)+gripper(1) | Cartesian EE / axis-angle | **delta** (gripper abs, −1 open/+1 close) | 10 |
+| **DROID** (`pi05_droid`) | Franka 1-arm | `ext_1`/`ext_2`/`wrist` 180×320 → `base_0_rgb`/`base_1`/`left_wrist_0_rgb` | **8**: joint(7)+gripper(1) | **8**: joint velocity | **joint space** | — | 15 |
+| **ALOHA** (`pi05_aloha`) | bimanual ALOHA | `cam_high`/`cam_left_wrist`/`cam_right_wrist` → 3 slots | **14**: per-arm joints(6)+gripper(1) | **14**: joint positions | **joint space** | optional delta (gripper abs) | ~50 |
+| **This recorder** (Franka, absolute-EE) | Franka 1-arm, Cartesian impedance | `observation.images.base` 720×1280 → `base_0_rgb` (2 wrist slots auto-black) | **10**: EE pos(3)+**6D**(6)+gripper(1) | **10**: EE pos(3)+**6D**(6)+gripper(1) | Cartesian EE / 6D | **absolute** | 30 |
+
+**Model side (pi0.5), uniform across embodiments:** state/action **zero-padded to 32**; action
+horizon 50 (`pi05_droid`=15, `pi05_libero`=10); **quantile (1%/99%→[−1,1]) normalization**;
+3 fixed image slots `base_0_rgb`/`left_wrist_0_rgb`/`right_wrist_0_rgb`, internally resized+padded
+to **224²**, missing slots black + mask False.
+
+**Key observation:** the three references each use a **different** space (axis-angle EE-delta /
+joint velocity / joint position) — **there is no unified format, and none use 6D.** So "copy the
+reference format exactly" is a non-goal; our absolute-EE + 6D is a regression-friendly, controller-
+native choice (see §4), not a reference-mandated one.
+
+---
+
 ## 3. π0.5 in HF LeRobot (`PI05Policy`)
 
 **It exists natively** — `src/lerobot/policies/pi05/` (`PI05Policy`, `PI05Config`,
