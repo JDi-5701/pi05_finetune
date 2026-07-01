@@ -4,8 +4,51 @@
 并最终部署回 ROS2。本仓库是这条链路的**验证 + 转换 + 训练 + 部署**工具集,在 GPU 机 `prs`
 的 `ros_ml` conda 环境里运行。仓库同步于 <https://github.com/JDi-5701/pi05_finetune>。
 
-> 详细的部署笔记 / DROID 冒烟记录 / pi05_base processor 坑见 [`pi05_deploy.md`](pi05_deploy.md)。
-> 本 README 是入口和操作手册。
+> **本仓库自带三份文档,接手只读这个文件夹即可:**
+> - [`README.md`](README.md)（本文）— 入口 + 操作手册 + 交接(§0)。
+> - [`PI05_DATA_FORMAT.md`](PI05_DATA_FORMAT.md) — LeRobot v2.1/v3.0 格式 + pi05 要求的**字段级规范**
+>   (研究结论;旋转格式的最终结论以本 README §4 为准)。
+> - [`pi05_deploy.md`](pi05_deploy.md) — 部署笔记 / DROID 冒烟记录 / pi05_base processor 坑。
+>
+> **录制新数据**用的是**另一个仓库** `franka_data_recorder`(在 NUC/prs 的 `~/ros_ml_ws/src/`,
+> 有自己的 README)。本仓库不负责采集,只消费它产出的数据集。
+
+---
+
+## 0. 接手须知(START HERE)
+
+**你的工作范围:只改本仓库(`~/ros_ml_ws/pi05_finetune`)里的代码/数据。** 具体:
+- **脚本**都在这里,直接改。
+- **录制的原始数据集在仓库外**(只读参考,由 NUC 的 recorder 产出):
+  `~/ros_ml_ws/src/franka_data_recorder/data/<task>_<timestamp>/`。目前有 7 条
+  `pick_up_sponge_20260701_155201`。
+- **你自己产出的东西放仓库内**(已 gitignore,不进 git):转换数据集 → `./datasets/`,
+  训练 checkpoint → `./outputs/`。这样你所有写操作都在本仓库内。
+
+**环境**:先 `rosml` 进 conda 环境。`pi05_base` 已缓存,脚本强制 `HF_HUB_OFFLINE`,离线可训。
+
+**现在进行到哪一步**:数据已录(7 条,冒烟量级)、`check_pi05_compat` 全 PASS、
+`convert_to_pi05` 可跑、相机命名 bug 已修(输出自动叫 `base_0_rgb`)。**下一步 = 跑过拟合冒烟
+微调,确认数据↔标注对得上**:
+
+```bash
+rosml && cd ~/ros_ml_ws/pi05_finetune && git pull
+SRC=/home/prs/ros_ml_ws/src/franka_data_recorder/data/pick_up_sponge_20260701_155201
+
+# 1) 转换(输出放仓库内 ./datasets/)
+rm -rf ./datasets/sponge_pi05_6d_abs
+python convert_to_pi05.py --root $SRC --out ./datasets/sponge_pi05_6d_abs --rot 6d --action-mode absolute
+
+# 2) 过拟合冒烟微调(loss 明显下降 = 数据是对的；不降 = 查动作-图像同步/gripper/归一化)
+python train_pi05.py --root ./datasets/sponge_pi05_6d_abs --repo-id sponge_pi05_6d_abs \
+    --output-dir ./outputs/pi05_overfit --steps 2000 --batch-size 8 --log-every 50
+```
+
+**冒烟通过后的真正任务**:采集更多数据(数十~上百条,见 §7)→ 加大 `--steps` 认真训 →
+按 `deploy_dryrun.py` + `pi05_deploy.md` 写 ROS2 部署节点。**改 loss / 模型架构做研究**就在
+`train_pi05.py` 的 `policy.forward(batch)` 那一行附近(文件末尾有说明)。
+
+细节全在下面各节;坑见 §6。
 
 ---
 
@@ -72,7 +115,7 @@
 ### 录制的原始 schema vs 转换后的格式
 | | 原始(recorder 输出) | 转换后(`convert_to_pi05.py --rot 6d`) |
 |---|---|---|
-| `observation.images.base` | video (720,1280,3) | 同左(模型内部 resize 到 224) |
+| 相机 | `observation.images.base` video (720,1280,3) | **改名 `observation.images.base_0_rgb`**(对上 pi05_base 槽位;模型内部 resize 到 224) |
 | `observation.state` | 15 维:`xyz + 四元数(4) + 力/力矩(6) + 双指(2)` | **10 维**:`xyz + 6D旋转 + gripper` |
 | `action` | 8 维:`xyz + 四元数(4) + gripper`,**绝对** | **10 维**:`xyz + 6D旋转 + gripper`,**绝对** |
 | gripper | action∈[0,1](1=开);state 是指位(m) | 统一归一到 [0,1] |
@@ -120,6 +163,10 @@ python train_pi05.py --root ${SRC%/*}/sponge_pi05_6d_abs --repo-id sponge_pi05_6
   `check_pi05_compat.py` / `train_pi05.py` 已在 import lerobot 前设好 offline;所以 pi05_base
   **必须先缓存**(见 §1)。
 - **转换目标目录必须不存在**:lerobot `create()` 用 `mkdir(exist_ok=False)`;残留目录先 `rm -rf`。
+- **相机键名必须匹配 pi05_base 槽位**:`pi05_base` config 期望 `base_0_rgb/left_wrist_0_rgb/
+  right_wrist_0_rgb`,按**精确名**匹配;键名不对会在 forward 报 `All image features are missing`。
+  `convert_to_pi05.py` 默认已把相机输出成 `observation.images.base_0_rgb`(`--out-cam-key`),
+  所以转换后的数据集自动对得上;别再用原始 `observation.images.base` 那个数据集直接训。
 - **pi05_base 坏掉的 `relative_actions_processor`**:官方预存 processor 里有个 enabled=false 但
   registry 不认的步骤,走 `lerobot-train`/`make_pre_post_processors(pretrained_path=...)` 会报错。
   `train_pi05.py` 通过**不传 pretrained_path 给 processor**规避;CLI 路线需手动删该步骤(有 .bak)。见 `pi05_deploy.md`。
@@ -132,8 +179,9 @@ python train_pi05.py --root ${SRC%/*}/sponge_pi05_6d_abs --repo-id sponge_pi05_6
 ## 7. 当前状态
 
 - ✅ 录制管线 + 相机(usb_cam rgb8 1280×720@30)通;7 条 `pick_up_sponge` 已录。
-- ✅ `check_pi05_compat.py`:原始数据集 schema 全 PASS(仅四元数 WARN)。
-- ✅ `convert_to_pi05.py`:6D+绝对 转换可跑。
-- ⏳ 过拟合冒烟微调 / 转换后复查:进行中。
+- ✅ `check_pi05_compat.py`:原始 + 转换后数据集 schema 全 PASS(转换后 state/action=(10,),无 WARN)。
+- ✅ `convert_to_pi05.py`:6D+绝对 转换可跑,相机自动输出 `base_0_rgb`(已修命名 bug)。
+- ⏳ **过拟合冒烟微调(§0 的下一步)**:模型加载 + 相机匹配已通,待确认 loss 下降。← 接手从这里继续
 - ⬜ 正式采集(数十~上百条,相机固定,起始位姿随机化)。
+- ⬜ 加大 steps 认真训 + 调超参。
 - ⬜ ROS2 部署节点(参考 `deploy_dryrun.py` + `pi05_deploy.md`)。
