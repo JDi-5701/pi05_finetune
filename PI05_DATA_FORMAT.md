@@ -389,6 +389,35 @@ If targeting openpi, there is no ready cartesian-EE policy — a custom `TrainCo
 - No explicit resolution-divisibility assert in LeRobot; even-H/W is a `yuv420p` codec requirement.
 - pi0.5 minimum episode count / mandatory fps: **not** officially specified.
 
+## 7.5 lerobot pi05 reliability & known bugs (researched ~2026-07)
+
+**Verdict:** the HF-lerobot pi05 port is **actively maintained** (≈monthly releases, staff-driven,
+scoped bugs fixed in days) but **genuinely rough in the processor / normalization / image-feature
+layer** — the two bugs we hit are *representative, not isolated*. openpi (JAX) is more faithful but
+**not easier** (JAX + 70 GB VRAM full-ft / 22.5 GB LoRA + Ubuntu-22.04 + incomplete PyTorch backend).
+Stay on lerobot; only switch to openpi for max fidelity at that cost.
+
+**Our two bugs, upstream:**
+- **"All image features are missing"** on a custom dataset = the camera keys don't match the base
+  model's `input_features` (issue **#3845**, pi0_fast/factory keeps base slots). **Workaround:** name
+  the camera to a base slot — `observation.images.base_0_rgb` — which `convert_to_pi05.py` does by default.
+- **`relative_actions_processor`** = registry key renamed `delta_actions_processor`→`relative_actions_processor`
+  and pi05_base's processor JSON migrated (**PR #3711**, Jun 2026); design flaw still open (**#3863**:
+  assumes `state[:action_dim]` aligns with action → can silently corrupt relative targets).
+  `train_pi05.py` sidesteps it by **not passing `pretrained_path` to `make_pre_post_processors`**.
+
+**Other live hazards:**
+- **Reproducibility gap:** `pi05_libero_base` reports ~**0% zero-shot** on LIBERO vs openpi's 96.85%
+  (#2533/#3638); parity only after extra fine-tuning + your own stats.
+- **#1 real-robot pain (whole community): normalization.** pi05 needs **QUANTILE** stats computed
+  from YOUR dataset — reusing base/LIBERO stats gives erratic behavior. (v3.0 datasets carry quantiles;
+  `train_pi05.py` uses `dataset.meta.stats` = fresh, correct.)
+- Quick-start dim mismatch #2963 (32 vs 8), transformers-version key mismatches (#1406 fixed, #2179 open).
+
+**Recommendation:** pin lerobot ≥ the #3711 fix (post-v0.5.1 / track main); always compute+use your
+dataset's quantile stats; watch #3845 (image features) and #3863 (relative-action alignment). Re-check
+open issues before a big training run — this space moves weekly.
+
 ## 8. Primary sources
 - LeRobot format: `src/lerobot/datasets/{utils,lerobot_dataset,compute_stats,dataset_writer}.py`;
   <https://huggingface.co/blog/lerobot-datasets-v3>; real `lerobot/pusht` @ `v2.1` vs `main`.
