@@ -15,40 +15,50 @@
 
 ---
 
-## 0. 接手须知(START HERE)
+## 0. 你的任务(START HERE)
 
-**你的工作范围:只改本仓库(`~/ros_ml_ws/pi05_finetune`)里的代码/数据。** 具体:
-- **脚本**都在这里,直接改。
-- **录制的原始数据集在仓库外**(只读参考,由 NUC 的 recorder 产出):
-  `~/ros_ml_ws/src/franka_data_recorder/data/<task>_<timestamp>/`。目前有 7 条
-  `pick_up_sponge_20260701_155201`。
-- **你自己产出的东西放仓库内**(已 gitignore,不进 git):转换数据集 → `./datasets/`,
-  训练 checkpoint → `./outputs/`。这样你所有写操作都在本仓库内。
+### 任务
+**让现有的 7 条 `pick_up_sponge` 数据集 finetune 跑通。** 即:`train_pi05.py` 正常迭代、
+loss 明显下降、存出 checkpoint。这是**过拟合/冒烟验证**(7 条学不出可泛化策略,目的是证明
+数据↔标注对得上、整条 pipeline 通)——**不追求效果,只追求"跑通 + loss 下降"**。
 
-**环境**:先 `rosml` 进 conda 环境。`pi05_base` 已缓存,脚本强制 `HF_HUB_OFFLINE`,离线可训。
+### 完成标准 (Definition of Done)
+- `train_pi05.py` 跑满 `--steps`,**无报错、无 OOM**;
+- **loss 明显下降**(参考 DROID 冒烟:0.4 → 0.3 甚至更低);
+- `./outputs/pi05_overfit/final/` 里有 checkpoint;
+- 把你**改了什么** + **最终 loss** 记进本 README 的 §7。
 
-**现在进行到哪一步**:数据已录(7 条,冒烟量级)、`check_pi05_compat` 全 PASS、
-`convert_to_pi05` 可跑、相机命名 bug 已修(输出自动叫 `base_0_rgb`)。**下一步 = 跑过拟合冒烟
-微调,确认数据↔标注对得上**:
+### 铁律
+- **只改本仓库(`~/ros_ml_ws/pi05_finetune`)的代码/脚本。绝不碰任何其他文件夹或仓库。**
+- **所有产出只落在本仓库内**:转换数据 → `./datasets/`,checkpoint → `./outputs/`(均已 gitignore)。
+- 报错就改**这里的脚本**(`convert_to_pi05.py` / `train_pi05.py`),改完在 §7 记一句。
+- 环境:先 `rosml` 进 conda。`pi05_base` 已缓存、脚本强制 `HF_HUB_OFFLINE`,离线可训。
 
+### 一次性准备:把原始数据拷进仓库(之后全程不读外部)
+原始 7 条在仓库外(recorder 只读产出)。**拷一份进来**,让后续所有读写都在本仓库内:
 ```bash
 rosml && cd ~/ros_ml_ws/pi05_finetune && git pull
-SRC=/home/prs/ros_ml_ws/src/franka_data_recorder/data/pick_up_sponge_20260701_155201
-
-# 1) 转换(输出放仓库内 ./datasets/)
-rm -rf ./datasets/sponge_pi05_6d_abs
-python convert_to_pi05.py --root $SRC --out ./datasets/sponge_pi05_6d_abs --rot 6d --action-mode absolute
-
-# 2) 过拟合冒烟微调(loss 明显下降 = 数据是对的；不降 = 查动作-图像同步/gripper/归一化)
-python train_pi05.py --root ./datasets/sponge_pi05_6d_abs --repo-id sponge_pi05_6d_abs \
-    --output-dir ./outputs/pi05_overfit --steps 2000 --batch-size 8 --log-every 50
+mkdir -p datasets
+cp -r ~/ros_ml_ws/src/franka_data_recorder/data/pick_up_sponge_20260701_155201 datasets/raw_pick_up_sponge
 ```
 
-**冒烟通过后的真正任务**:采集更多数据(数十~上百条,见 §7)→ 加大 `--steps` 认真训 →
-按 `deploy_dryrun.py` + `pi05_deploy.md` 写 ROS2 部署节点。**改 loss / 模型架构做研究**就在
-`train_pi05.py` 的 `policy.forward(batch)` 那一行附近(文件末尾有说明)。
+### 跑通流程(全部在本仓库内)
+```bash
+# 1) 转换 -> ./datasets/（相机自动输出 base_0_rgb，对上 pi05_base 槽位）
+rm -rf ./datasets/sponge_pi05_6d_abs
+python convert_to_pi05.py --root ./datasets/raw_pick_up_sponge --out ./datasets/sponge_pi05_6d_abs --rot 6d --action-mode absolute
 
-细节全在下面各节;坑见 §6。
+# 2) 复查（应看到 state/action=(10,)、相机 observation.images.base_0_rgb、无 WARN）
+python check_pi05_compat.py --root ./datasets/sponge_pi05_6d_abs --sample
+
+# 3) 过拟合冒烟微调
+python train_pi05.py --root ./datasets/sponge_pi05_6d_abs --repo-id sponge_pi05_6d_abs --output-dir ./outputs/pi05_overfit --steps 2000 --batch-size 8 --log-every 50
+```
+**loss 不降 / 发散** → 查:动作-图像是否同步、gripper 方向、归一化;改 `train_pi05.py` /
+`convert_to_pi05.py`。**已知会踩的坑见 §6**(相机键名、目录不能存在、pi05_base processor)。
+
+> 这个任务**只在本仓库内闭环**,不需要采新数据,也不用碰 `franka_data_recorder`。
+> 改 loss / 模型架构做研究:在 `train_pi05.py` 的 `policy.forward(batch)` 一行附近(文件末尾有说明)。
 
 ---
 
@@ -123,36 +133,30 @@ python train_pi05.py --root ./datasets/sponge_pi05_6d_abs --repo-id sponge_pi05_
 
 ---
 
-## 5. 在 prs 上一步步怎么做
+## 5. 通用流程参考(换数据集时)
+
+> **本次交接任务的确切命令在 §0**;这里是处理**任意**数据集的通用版。产出一律放仓库内
+> `./datasets/`(转换)+ `./outputs/`(checkpoint)。想处理一个新的外部数据集时,先
+> `cp -r <外部数据集> datasets/<名字>`,之后全部用仓库内路径:
 
 ```bash
-# 0) 进环境 + 拉最新脚本
-rosml
-cd ~/ros_ml_ws/pi05_finetune && git pull
+rosml && cd ~/ros_ml_ws/pi05_finetune && git pull
+DS=./datasets/sponge_pi05_6d_abs           # 转换输出(仓库内)
 
-# 设你要处理的数据集(改时间戳换 run)
-SRC=/home/prs/ros_ml_ws/src/franka_data_recorder/data/pick_up_sponge_20260701_155201
+# 1) 转换(相机自动输出 base_0_rgb)。目标目录必须不存在
+rm -rf $DS
+python convert_to_pi05.py --root ./datasets/raw_pick_up_sponge --out $DS --rot 6d --action-mode absolute
+#    每条 episode 用 SVT-AV1 编码视频(日志啰嗦但没卡),结束打印 "done -> ... dim=10"
 
-# 1) 验证原始数据集
-python check_pi05_compat.py --root $SRC --sample
-#    看到 v3.0 / 1 camera / state,action / task 全 PASS 即可(四元数会 WARN,正常)
+# 2) 复查(quaternion WARN 应消失,state/action = (10,))
+python check_pi05_compat.py --root $DS --sample
 
-# 2) 转成 pi05 格式(6D + 绝对)。目标目录必须不存在
-rm -rf ${SRC%/*}/sponge_pi05_6d_abs
-python convert_to_pi05.py --root $SRC --out ${SRC%/*}/sponge_pi05_6d_abs --rot 6d --action-mode absolute
-#    每条 episode 会用 SVT-AV1 编码视频(日志啰嗦但没卡),结束打印 "done -> ... dim=10"
-
-# 3) 复查转换后(quaternion WARN 应消失,state/action = (10,))
-python check_pi05_compat.py --root ${SRC%/*}/sponge_pi05_6d_abs --sample
-
-# 4) 过拟合冒烟微调(验证数据↔标注对得上;pi05_base 已缓存,离线读)
-python train_pi05.py --root ${SRC%/*}/sponge_pi05_6d_abs --repo-id sponge_pi05_6d_abs \
+# 3) 过拟合冒烟微调
+python train_pi05.py --root $DS --repo-id sponge_pi05_6d_abs \
     --output-dir ./outputs/pi05_overfit --steps 2000 --batch-size 8 --log-every 50
-#    loss 明显下降 = 数据是对的;不降/发散 = 查动作-图像同步/gripper 方向/归一化
 ```
 
-> 想 A/B 对比"更贴近 LIBERO"的格式:`convert_to_pi05.py ... --rot aa --action-mode delta`。
-> 也可**跳过转换直接训原始数据集**(四元数,回归差点,冒烟无所谓)。
+> A/B 对比"更贴近 LIBERO"的格式:`convert_to_pi05.py ... --rot aa --action-mode delta`。
 > 官方 `lerobot-train` CLI 路线(需先修 pi05_base processor JSON)见 `pi05_deploy.md`。
 
 ---
