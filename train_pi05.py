@@ -13,6 +13,13 @@ pi05 自定义 finetune 脚本（DROID Franka 数据）。
     python train_pi05.py --root /path/to/<dataset_dir> --repo-id pick_up_sponge --steps 200
 """
 import argparse
+import os
+
+# Local dataset: don't let lerobot query the HF Hub for a dataset "version" (it 404s on a
+# local-only repo_id). Set BEFORE importing lerobot. pi05_base must therefore be CACHED
+# already (download once with internet: `huggingface-cli download lerobot/pi05_base`).
+os.environ.setdefault("HF_HUB_OFFLINE", "1")
+os.environ.setdefault("HF_DATASETS_OFFLINE", "1")
 
 import torch
 import torch.nn.functional as F
