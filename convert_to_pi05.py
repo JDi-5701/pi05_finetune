@@ -104,8 +104,10 @@ def main():
     ap.add_argument("--cam-key", default="observation.images.base", help="camera feature key")
     args = ap.parse_args()
 
-    if os.path.exists(os.path.join(args.out, "meta", "info.json")):
-        raise SystemExit(f"destination already has a dataset: {args.out} (delete it or pick a new --out)")
+    if os.path.exists(args.out):
+        raise SystemExit(
+            f"destination already exists: {args.out}\n"
+            f"lerobot create requires a non-existent dir. Delete it (rm -rf) or pick a new --out.")
 
     src = LeRobotDataset(os.path.basename(args.root), root=args.root)
     print(f"source: {src.num_episodes} episodes, {src.num_frames} frames @ {src.fps} fps")
