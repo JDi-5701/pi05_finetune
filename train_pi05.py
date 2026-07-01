@@ -13,7 +13,9 @@ pi05 自定义 finetune 脚本（DROID Franka 数据）。
     python train_pi05.py --root /path/to/<dataset_dir> --repo-id pick_up_sponge --steps 200
 """
 import argparse
+import json
 import os
+from pathlib import Path
 
 # Local dataset: don't let lerobot query the HF Hub for a dataset "version" (it 404s on a
 # local-only repo_id). Set BEFORE importing lerobot. pi05_base must therefore be CACHED
@@ -25,9 +27,12 @@ import torch
 import torch.nn.functional as F
 from torch.utils.data import DataLoader
 
+from lerobot.configs.policies import PreTrainedConfig
+from lerobot.configs.types import FeatureType, PolicyFeature
 from lerobot.datasets.lerobot_dataset import LeRobotDataset
 from lerobot.policies.pi05 import PI05Policy
 from lerobot.policies.factory import make_pre_post_processors
+from lerobot.utils.constants import ACTION, OBS_LANGUAGE_ATTENTION_MASK, OBS_LANGUAGE_TOKENS, OBS_STATE
 
 # ---------------- 默认配置（可被命令行覆盖）----------------
 REPO_ID = "local/droid_smoke"
@@ -57,6 +62,9 @@ def parse_args():
     ap.add_argument("--save-every", type=int, default=SAVE_EVERY)
     ap.add_argument("--lr", type=float, default=LR)
     ap.add_argument("--num-workers", type=int, default=4)
+    ap.add_argument("--dtype", default="bfloat16", help="model dtype; bfloat16 saves VRAM")
+    ap.add_argument("--full-model", action="store_true", help="train all pi05 weights instead of expert only")
+    ap.add_argument("--no-gradient-checkpointing", action="store_true", help="disable activation checkpointing")
     return ap.parse_args()
 
 
@@ -67,21 +75,94 @@ def pad_to(t, dim):
     return t
 
 
+def pad_or_trim_language(batch, length):
+    """pi05 expects fixed-length language tokens/masks for attention construction."""
+    if OBS_LANGUAGE_TOKENS not in batch or OBS_LANGUAGE_ATTENTION_MASK not in batch:
+        return batch
+
+    tokens = batch[OBS_LANGUAGE_TOKENS]
+    masks = batch[OBS_LANGUAGE_ATTENTION_MASK]
+
+    if tokens.shape[-1] > length:
+        batch[OBS_LANGUAGE_TOKENS] = tokens[..., :length]
+    elif tokens.shape[-1] < length:
+        batch[OBS_LANGUAGE_TOKENS] = F.pad(tokens, (0, length - tokens.shape[-1]), value=0)
+
+    if masks.shape[-1] > length:
+        batch[OBS_LANGUAGE_ATTENTION_MASK] = masks[..., :length]
+    elif masks.shape[-1] < length:
+        batch[OBS_LANGUAGE_ATTENTION_MASK] = F.pad(masks, (0, length - masks.shape[-1]), value=False)
+
+    return batch
+
+
+def save_checkpoint(policy, preprocess, postprocess, path):
+    policy.save_pretrained(path)
+    preprocess.save_pretrained(path)
+    postprocess.save_pretrained(path)
+
+
+def read_dataset_fps(root):
+    info_path = Path(root) / "meta" / "info.json"
+    return int(json.loads(info_path.read_text())["fps"])
+
+
+def read_dataset_dims(root):
+    info_path = Path(root) / "meta" / "info.json"
+    features = json.loads(info_path.read_text())["features"]
+    state_dim = int(features[OBS_STATE]["shape"][0])
+    action_dim = int(features[ACTION]["shape"][0])
+    return state_dim, action_dim
+
+
+def adapt_policy_features_to_dataset(policy_config, state_dim, action_dim):
+    """Keep pi05's 32-dim container, but expose the real robot dims for loss/output."""
+    policy_config.input_features[OBS_STATE] = PolicyFeature(
+        type=FeatureType.STATE,
+        shape=(state_dim,),
+    )
+    policy_config.output_features[ACTION] = PolicyFeature(
+        type=FeatureType.ACTION,
+        shape=(action_dim,),
+    )
+
+
+def make_action_delta_timestamps(policy_config, fps):
+    indices = getattr(policy_config, "action_delta_indices", None)
+    if indices is None:
+        indices = range(getattr(policy_config, "chunk_size", 1))
+    return {ACTION: [i / fps for i in indices]}
+
+
 def main():
     args = parse_args()
     device = torch.device(args.device)
 
-    # 1) 数据集
-    dataset = LeRobotDataset(args.repo_id, root=args.root)
-    print(f"dataset: {dataset.num_episodes} episodes, {dataset.num_frames} frames "
-          f"({args.root})")
+    # 1) 模型
+    policy_config = PreTrainedConfig.from_pretrained(args.pretrained)
+    policy_config.device = str(device)
+    if hasattr(policy_config, "dtype"):
+        policy_config.dtype = args.dtype
+    if hasattr(policy_config, "train_expert_only"):
+        policy_config.train_expert_only = not args.full_model
+    if hasattr(policy_config, "gradient_checkpointing"):
+        policy_config.gradient_checkpointing = not args.no_gradient_checkpointing
 
-    # 2) 模型
-    policy = PI05Policy.from_pretrained(args.pretrained)
-    if hasattr(policy.config, "train_expert_only"):
-        policy.config.train_expert_only = True
+    state_dim, action_dim = read_dataset_dims(args.root)
+    adapt_policy_features_to_dataset(policy_config, state_dim, action_dim)
+
+    policy = PI05Policy.from_pretrained(args.pretrained, config=policy_config)
     policy.to(device)
     policy.train()
+
+    # 2) 数据集：pi05 forward 训练 50-step action chunk，不是单步 action
+    fps = read_dataset_fps(args.root)
+    delta_timestamps = make_action_delta_timestamps(policy.config, fps)
+    dataset = LeRobotDataset(args.repo_id, root=args.root, delta_timestamps=delta_timestamps)
+    print(f"dataset: {dataset.num_episodes} episodes, {dataset.num_frames} frames "
+          f"({args.root})")
+    print(f"robot dims: state={state_dim}, action={action_dim} (padded to {MODEL_DIM} internally)")
+    print(f"action chunk: {len(delta_timestamps[ACTION])} steps @ {fps} fps")
 
     # 3) processor —— 不传 pretrained_path，避免加载坏掉的预存配置
     preprocess, postprocess = make_pre_post_processors(
@@ -100,7 +181,11 @@ def main():
     )
 
     # 5) optimizer
-    optimizer = torch.optim.AdamW(policy.parameters(), lr=args.lr)
+    trainable_params = [p for p in policy.parameters() if p.requires_grad]
+    total_params = sum(p.numel() for p in policy.parameters())
+    trainable_count = sum(p.numel() for p in trainable_params)
+    print(f"trainable params: {trainable_count/1e6:.1f}M / {total_params/1e6:.1f}M")
+    optimizer = torch.optim.AdamW(trainable_params, lr=args.lr)
 
     # 6) 训练循环
     step = 0
@@ -115,6 +200,7 @@ def main():
             # pad state/action -> 32
             batch["observation.state"] = pad_to(batch["observation.state"], MODEL_DIM)
             batch["action"] = pad_to(batch["action"], MODEL_DIM)
+            batch = pad_or_trim_language(batch, policy.config.tokenizer_max_length)
 
             loss, _ = policy.forward(batch)   # ← 想改 loss / 做研究就在这附近
             loss.backward()
@@ -127,14 +213,14 @@ def main():
                 print(f"step {step:4d}  loss {loss.item():.4f}  peak_mem {mem:.1f}GB")
 
             if step > 0 and step % args.save_every == 0:
-                policy.save_pretrained(f"{args.output_dir}/step_{step}")
+                save_checkpoint(policy, preprocess, postprocess, f"{args.output_dir}/step_{step}")
                 print(f"  saved checkpoint -> {args.output_dir}/step_{step}")
 
             step += 1
             if step >= args.steps:
                 break
 
-    policy.save_pretrained(f"{args.output_dir}/final")
+    save_checkpoint(policy, preprocess, postprocess, f"{args.output_dir}/final")
     print(f"done. final model -> {args.output_dir}/final")
 
 
