@@ -101,7 +101,12 @@ def main():
                     help="rotation representation (default 6d; 'aa'=axis-angle like LIBERO)")
     ap.add_argument("--action-mode", choices=["absolute", "delta"], default="absolute",
                     help="absolute EE (default, matches our controller) or delta EE (like LIBERO)")
-    ap.add_argument("--cam-key", default="observation.images.base", help="camera feature key")
+    ap.add_argument("--cam-key", default="observation.images.base",
+                    help="SOURCE camera feature key to read from")
+    ap.add_argument("--out-cam-key", default="observation.images.base_0_rgb",
+                    help="OUTPUT camera key. pi05_base's config expects base_0_rgb / "
+                         "left_wrist_0_rgb / right_wrist_0_rgb (exact-name match); our single "
+                         "scene cam -> base_0_rgb, the 2 wrist slots are auto zero-padded.")
     args = ap.parse_args()
 
     if os.path.exists(args.out):
@@ -118,8 +123,8 @@ def main():
     names = ["x", "y", "z"] + rot_names + ["gripper"]
 
     features = {
-        args.cam_key: {"dtype": "video", "shape": (H, W, 3),
-                       "names": ["height", "width", "channels"]},
+        args.out_cam_key: {"dtype": "video", "shape": (H, W, 3),
+                           "names": ["height", "width", "channels"]},
         "observation.state": {"dtype": "float32", "shape": (dim,), "names": names},
         "action": {"dtype": "float32", "shape": (dim,), "names": names},
     }
@@ -136,7 +141,7 @@ def main():
         if prev_ep is not None and ep != prev_ep:
             dst.save_episode()
         dst.add_frame({
-            args.cam_key: chw_float_to_hwc_uint8(f[args.cam_key]),
+            args.out_cam_key: chw_float_to_hwc_uint8(f[args.cam_key]),
             "observation.state": make_state(f["observation.state"], args.rot),
             "action": make_action(f["action"], f["observation.state"], args.rot, args.action_mode),
             "task": f["task"],
