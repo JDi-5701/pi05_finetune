@@ -1,0 +1,17 @@
+# pi05_finetune — one-line commands. Copy ONE line into the prs SSH terminal (ros_ml env),
+# run from the folder that holds these scripts. Multi-line paste breaks; these are single lines.
+#
+# dataset dir on prs (edit the timestamp for a different run):
+#   /home/prs/ros_ml_ws/src/franka_data_recorder/data/pick_up_sponge_20260701_155201
+
+# 1) schema check: read info.json, PASS/WARN/FAIL vs pi05 requirements
+python check_pi05_compat.py --root /home/prs/ros_ml_ws/src/franka_data_recorder/data/pick_up_sponge_20260701_155201
+
+# 2) + load one real frame and print tensor shapes/dtypes
+python check_pi05_compat.py --root /home/prs/ros_ml_ws/src/franka_data_recorder/data/pick_up_sponge_20260701_155201 --sample
+
+# 3) + dry-run the pi05 processor on one frame (full end-to-end format check)
+python check_pi05_compat.py --root /home/prs/ros_ml_ws/src/franka_data_recorder/data/pick_up_sponge_20260701_155201 --sample --pi05-ckpt lerobot/pi05_base
+
+# 4) smoke finetune pi05 (7 episodes -> pipeline test ONLY, not a usable policy)
+python train_pi05.py --root /home/prs/ros_ml_ws/src/franka_data_recorder/data/pick_up_sponge_20260701_155201 --repo-id pick_up_sponge --output-dir ./outputs/pi05_sponge --steps 200 --batch-size 8
