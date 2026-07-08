@@ -1,26 +1,23 @@
-# pi05_finetune — one-line commands. Copy ONE line into the prs SSH terminal (ros_ml env),
-# run from the folder that holds these scripts. Multi-line paste breaks; these are single lines.
-#
-# source dataset dir on prs (edit the timestamp for a different run):
-#   /home/prs/ros_ml_ws/src/franka_data_recorder/data/pick_up_sponge_20260701_155201
+# pi05_finetune one-line commands.
+# Run from ~/ros_ml_ws/pi05_finetune after entering the ros_ml environment.
 
-# --- verify the RAW recorded dataset -------------------------------------------------------
-# 1) schema check: read info.json, PASS/WARN/FAIL vs pi05 requirements
-python check_pi05_compat.py --root /home/prs/ros_ml_ws/src/franka_data_recorder/data/pick_up_sponge_20260701_155201
+# enter environment
+rosml && cd ~/ros_ml_ws/pi05_finetune
 
-# 2) + load one real frame and print tensor shapes/dtypes
-python check_pi05_compat.py --root /home/prs/ros_ml_ws/src/franka_data_recorder/data/pick_up_sponge_20260701_155201 --sample
+# 1) rewrite raw actions from next observation.state
+python fix_raw_action_from_next_state.py --root ./datasets/raw_pick_up_sponge_42 --out ./datasets/raw_pick_up_sponge_42_next_state --overwrite
 
-# --- convert to a pi0.5 format -------------------------------------------------------------
-# 3a) 6D rotation + ABSOLUTE EE (best NN target, plugs into cartesian_impedance controller)
-python convert_to_pi05.py --root /home/prs/ros_ml_ws/src/franka_data_recorder/data/pick_up_sponge_20260701_155201 --out /home/prs/ros_ml_ws/src/franka_data_recorder/data/sponge_pi05_6d_abs --rot 6d --action-mode absolute
+# 2) convert to 7D axis-angle delta dataset for pi0.5
+rm -rf ./datasets/sponge_pi05_aa_delta_42_next_state_v2 && python convert_to_pi05v2.py --root ./datasets/raw_pick_up_sponge_42_next_state --out ./datasets/sponge_pi05_aa_delta_42_next_state_v2 --repo-id sponge_pi05_aa_delta_42_next_state_v2 --rot aa --action-mode delta --chunk-size 50
 
-# 3b) axis-angle + DELTA EE (closest to pi05's LIBERO reference format) -- for A/B compare
-python convert_to_pi05.py --root /home/prs/ros_ml_ws/src/franka_data_recorder/data/pick_up_sponge_20260701_155201 --out /home/prs/ros_ml_ws/src/franka_data_recorder/data/sponge_pi05_aa_delta --rot aa --action-mode delta
+# 3) train
+python train_pi05.py --root ./datasets/sponge_pi05_aa_delta_42_next_state_v2 --repo-id sponge_pi05_aa_delta_42_next_state_v2 --output-dir ./outputs/pi05_aa_delta_42_next_state_v2 --steps 2000 --batch-size 8 --log-every 50 --save-every 500 --num-workers 4 --action-delta-reference chunk-start --input-action-format same-frame-delta
 
-# 4) re-check a converted dataset (WARN about quaternion should be gone)
-python check_pi05_compat.py --root /home/prs/ros_ml_ws/src/franka_data_recorder/data/sponge_pi05_6d_abs --sample
+# 4) train with W&B
+python train_pi05.py --root ./datasets/sponge_pi05_aa_delta_42_next_state_v2 --repo-id sponge_pi05_aa_delta_42_next_state_v2 --output-dir ./outputs/pi05_aa_delta_42_next_state_v2 --steps 2000 --batch-size 8 --log-every 50 --save-every 500 --num-workers 4 --action-delta-reference chunk-start --input-action-format same-frame-delta --wandb --wandb-project pi05_finetune --wandb-name pi05_aa_delta_42_next_state_v2
 
-# --- smoke finetune (7 eps -> pipeline test ONLY, not a usable policy) ----------------------
-# 5) finetune pi05 on the converted dataset (needs lerobot/pi05_base cached or internet)
-python train_pi05.py --root /home/prs/ros_ml_ws/src/franka_data_recorder/data/sponge_pi05_6d_abs --repo-id sponge_pi05_6d_abs --output-dir ./outputs/pi05_sponge --steps 200 --batch-size 8
+# 5) infer/debug final checkpoint
+python infer_aa_delta.py --ckpt ./outputs/pi05_aa_delta_42_next_state_v2/final --root ./datasets/sponge_pi05_aa_delta_42_next_state_v2 --repo-id sponge_pi05_aa_delta_42_next_state_v2 --episode-index 0 --chunk-stride 30 --take-steps 30 --rollout-from-chunk-start --plot-out ./outputs/episode0_aa_delta_debug.png --device cuda
+
+# 6) infer/debug a step checkpoint
+python infer_aa_delta.py --ckpt ./outputs/pi05_aa_delta_42_next_state_v2/step_2000 --root ./datasets/sponge_pi05_aa_delta_42_next_state_v2 --repo-id sponge_pi05_aa_delta_42_next_state_v2 --episode-index 0 --chunk-stride 30 --take-steps 30 --rollout-from-chunk-start --plot-out ./outputs/episode0_step2000_aa_delta_debug.png --device cuda
